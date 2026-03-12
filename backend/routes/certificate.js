@@ -3,16 +3,9 @@ const router = express.Router();
 const fs = require('fs');
 const path = require('path');
 const csv = require('csv-parser');
-const { createObjectCsvWriter } = require('csv-writer');
 const PDFDocument = require('pdfkit');
 
 const CSV_PATH = path.join(__dirname, '../data/participants.csv');
-const CERT_DIR = path.join(__dirname, '../certificates');
-
-// Ensure certificates directory exists
-if (!fs.existsSync(CERT_DIR)) {
-  fs.mkdirSync(CERT_DIR, { recursive: true });
-}
 
 // ─── Helper: Read all CSV rows ────────────────────────────────────────────────
 function readCSV() {
@@ -26,38 +19,19 @@ function readCSV() {
   });
 }
 
-// ─── Helper: Write all rows back to CSV ──────────────────────────────────────
-function writeCSV(rows) {
-  return new Promise((resolve, reject) => {
-    const writer = createObjectCsvWriter({
-      path: CSV_PATH,
-      header: [
-        { id: 'email', title: 'email' },
-        { id: 'name', title: 'name' },
-        { id: 'team_name', title: 'team_name' },
-        { id: 'role', title: 'role' },
-        { id: 'used', title: 'used' },
-      ],
-    });
-    writer.writeRecords(rows).then(resolve).catch(reject);
-  });
-}
-
-// ─── Helper: Generate PDF Certificate ────────────────────────────────────────
+// ─── Helper: Generate PDF Certificate (in-memory, no disk write) ────────────
 function generateCertificate(participant) {
   return new Promise((resolve, reject) => {
-    const safeEmail = participant.email.replace(/[@.]/g, '_');
-    const filename = `certificate_${safeEmail}.pdf`;
-    const filepath = path.join(CERT_DIR, filename);
-
     const doc = new PDFDocument({
       size: 'A4',
       layout: 'landscape',
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
 
-    const stream = fs.createWriteStream(filepath);
-    doc.pipe(stream);
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
 
     const W = doc.page.width;   // 841.89
     const H = doc.page.height;  // 595.28
@@ -205,8 +179,6 @@ function generateCertificate(participant) {
 
     // ── Finalize ──────────────────────────────────────────────────────────────
     doc.end();
-    stream.on('finish', () => resolve(filename));
-    stream.on('error', reject);
   });
 }
 
@@ -247,27 +219,16 @@ router.post('/generate-certificate', async (req, res) => {
     }
 
 
-    // 6. Generate PDF certificate
-    const filename = await generateCertificate(participant);
+    // 6. Generate PDF certificate in memory
+    const pdfBuffer = await generateCertificate(participant);
 
-    // 7. Mark as used in CSV
-    const updatedRows = rows.map((r) => {
-      if (r.email.trim().toLowerCase() === normalizedEmail) {
-        return { ...r, used: 'true' };
-      }
-      return r;
-    });
-    await writeCSV(updatedRows);
-
-    // 8. Return download URL
-    res.json({
-      success: true,
-      message: 'Certificate generated successfully!',
-      name: participant.name,
-      team_name: participant.team_name,
-      role: participant.role,
-      downloadUrl: `/certificates/${filename}`,
-    });
+    // 7. Send binary PDF directly — cert data passed via headers (no disk write)
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="DropOutHacks_Certificate_${participant.name.replace(/\s+/g, '_')}.pdf"`);
+    res.setHeader('X-Cert-Name', encodeURIComponent(participant.name));
+    res.setHeader('X-Cert-Team', encodeURIComponent(participant.team_name));
+    res.setHeader('X-Cert-Role', encodeURIComponent(participant.role));
+    res.send(pdfBuffer);
   } catch (err) {
     console.error('Error generating certificate:', err);
     res.status(500).json({ success: false, message: 'Server error. Please try again.' });
@@ -302,6 +263,7 @@ router.get('/check-email', async (req, res) => {
       eligible: true,
       used: participant.used === 'true',
       name: participant.name,
+      team_name: participant.team_name,
       role: participant.role,
     });
   } catch (err) {

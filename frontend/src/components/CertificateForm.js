@@ -26,11 +26,11 @@ function CertificateForm() {
       const res = await fetch(`${API_BASE}/api/check-email?email=${encodeURIComponent(email.trim())}`);
       const data = await res.json();
 
-      if (data.success) {
-        setPreview(data.data);
+      if (data.found && data.eligible) {
+        setPreview({ name: data.name, role: data.role, team_name: data.team_name });
         setStatus('preview');
       } else {
-        setMessage(data.message);
+        setMessage(data.message || 'Not eligible for a certificate.');
         setStatus('error');
       }
     } catch (err) {

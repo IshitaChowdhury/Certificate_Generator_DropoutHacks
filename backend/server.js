@@ -7,7 +7,9 @@ const app = express();
 const PORT = 5000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  exposedHeaders: ['X-Cert-Name', 'X-Cert-Team', 'X-Cert-Role'],
+}));
 app.use(express.json());
 
 // Serve generated certificates as static files
