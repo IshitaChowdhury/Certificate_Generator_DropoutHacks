@@ -6,7 +6,7 @@ PDFs are generated **in memory** on the server and sent directly to the browser 
 
 ---
 
-## 🛠 Tech Stack
+## 🛠 Tech Stacks
 
 | Layer    | Technology |
 |----------|------------|
