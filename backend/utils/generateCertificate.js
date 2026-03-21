@@ -1,227 +1,273 @@
-const PDFDocument = require('pdfkit');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
+const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const fontkit = require('@pdf-lib/fontkit');
 
-// Make sure certificates folder exists
-const CERT_DIR = path.join(__dirname, '../certificates');
-if (!fs.existsSync(CERT_DIR)) {
-  fs.mkdirSync(CERT_DIR, { recursive: true });
+const TEMPLATE_DIR = path.join(__dirname, '../templates');
+const TEMPLATE_CONFIG_PATH = path.join(TEMPLATE_DIR, 'config.json');
+const ORBITRON_FONT_PATH = path.join(TEMPLATE_DIR, 'fonts', 'Orbitron.ttf');
+
+function resolveConfiguredFontPath(configPathValue) {
+  if (!configPathValue || typeof configPathValue !== 'string') {
+    return null;
+  }
+
+  if (path.isAbsolute(configPathValue)) {
+    return configPathValue;
+  }
+
+  return path.join(TEMPLATE_DIR, configPathValue);
 }
 
-/**
- * Generates a certificate PDF for a participant.
- * @param {Object} participant - { name, team_name, role }
- * @returns {Promise<string>} - Path to generated PDF
- */
-function generateCertificate(participant) {
-  return new Promise((resolve, reject) => {
-    const { name, team_name, role } = participant;
-    const EVENT_NAME = 'DropOutHacks Hackathon';
+function fitTextSize(text, font, preferred, min, maxWidth) {
+  let size = preferred;
+  while (size > min) {
+    if (font.widthOfTextAtSize(text, size) <= maxWidth) {
+      return size;
+    }
+    size -= 1;
+  }
+  return min;
+}
 
-    // Sanitize filename
-    const safeName = name.replace(/[^a-z0-9]/gi, '_');
-    const fileName = `certificate_${safeName}_${Date.now()}.pdf`;
-    const filePath = path.join(CERT_DIR, fileName);
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
-    // A4 landscape
-    const doc = new PDFDocument({
-      layout: 'landscape',
-      size: 'A4',
-      margin: 0,
-    });
+function loadTemplateConfig() {
+  if (!fs.existsSync(TEMPLATE_CONFIG_PATH)) {
+    throw new Error(`Template config not found: ${TEMPLATE_CONFIG_PATH}`);
+  }
 
-    const stream = fs.createWriteStream(filePath);
-    doc.pipe(stream);
+  const raw = fs.readFileSync(TEMPLATE_CONFIG_PATH, 'utf-8');
+  const parsed = JSON.parse(raw);
 
-    const W = 841.89; // A4 landscape width in pts
-    const H = 595.28; // A4 landscape height in pts
+  if (!parsed.templateFile || !parsed.fields || !parsed.fields.name || !parsed.fields.team_name) {
+    throw new Error('Invalid template config. Required: templateFile, fields.name, fields.team_name');
+  }
 
-    // ── BACKGROUND ──────────────────────────────────────────────
-    // Deep navy base
-    doc.rect(0, 0, W, H).fill('#0A0E2A');
+  return parsed;
+}
 
-    // Gold top border stripe
-    doc.rect(0, 0, W, 12).fill('#C9A84C');
-    // Gold bottom border stripe
-    doc.rect(0, H - 12, W, 12).fill('#C9A84C');
-    // Gold left border stripe
-    doc.rect(0, 0, 12, H).fill('#C9A84C');
-    // Gold right border stripe
-    doc.rect(W - 12, 0, 12, H).fill('#C9A84C');
+async function generateCertificate(participant) {
+  const config = loadTemplateConfig();
+  const templatePath = path.join(TEMPLATE_DIR, config.templateFile);
 
-    // Inner border (thin gold line)
-    doc
-      .rect(28, 28, W - 56, H - 56)
-      .lineWidth(1.5)
-      .stroke('#C9A84C');
+  if (!fs.existsSync(templatePath)) {
+    throw new Error(`Template PDF not found: ${templatePath}`);
+  }
 
-    // Decorative corner squares
-    const corners = [
-      [20, 20], [W - 40, 20], [20, H - 40], [W - 40, H - 40]
-    ];
-    corners.forEach(([x, y]) => {
-      doc.rect(x, y, 20, 20).fill('#C9A84C');
-    });
+  const templateBytes = fs.readFileSync(templatePath);
+  const pdfDoc = await PDFDocument.load(templateBytes);
+  pdfDoc.registerFontkit(fontkit);
+  const page = pdfDoc.getPages()[0];
+  const pageWidth = page.getWidth();
 
-    // Subtle diagonal watermark-like background text
-    doc.save();
-    doc.rotate(-35, { origin: [W / 2, H / 2] });
-    doc
-      .fontSize(130)
-      .fillColor('#C9A84C')
-      .opacity(0.04)
-      .font('Helvetica-Bold')
-      .text('DROPOUTHACKS', W / 2 - 350, H / 2 - 70);
-    doc.restore();
-    doc.opacity(1);
+  const nameText = (participant.name || '').trim();
+  const teamText = (participant.team_name || '').trim();
 
-    // ── HEADER ────────────────────────────────────────────────────
-    // Event logo text
-    doc
-      .fontSize(13)
-      .fillColor('#C9A84C')
-      .font('Helvetica-Bold')
-      .text('⬡  DROPOUTHACKS  ⬡', 0, 55, { align: 'center' });
+  const nameCfg = config.fields.name;
+  const teamCfg = config.fields.team_name;
 
-    // "Certificate of" label
-    doc
-      .fontSize(16)
-      .fillColor('#8A9BB8')
-      .font('Helvetica')
-      .text('C E R T I F I C A T E   O F', 0, 90, {
-        align: 'center',
-        characterSpacing: 4,
-      });
+  let nameFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  let teamFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-    // Main title based on role
-    const titleWord = role === 'Finalist' ? 'ACHIEVEMENT' : 'PARTICIPATION';
-    doc
-      .fontSize(52)
-      .fillColor('#FFFFFF')
-      .font('Helvetica-Bold')
-      .text(titleWord, 0, 115, { align: 'center' });
+  const configuredNameFontPath = resolveConfiguredFontPath(nameCfg.fontFile);
+  const configuredTeamFontPath = resolveConfiguredFontPath(teamCfg.fontFile);
 
-    // Gold divider line
-    const lineY = 182;
-    doc
-      .moveTo(W / 2 - 160, lineY)
-      .lineTo(W / 2 + 160, lineY)
-      .lineWidth(1)
-      .stroke('#C9A84C');
+  if (configuredNameFontPath && fs.existsSync(configuredNameFontPath)) {
+    const nameFontBytes = fs.readFileSync(configuredNameFontPath);
+    nameFont = await pdfDoc.embedFont(nameFontBytes, { subset: true });
+  } else if (fs.existsSync(ORBITRON_FONT_PATH)) {
+    const orbitronBytes = fs.readFileSync(ORBITRON_FONT_PATH);
+    nameFont = await pdfDoc.embedFont(orbitronBytes, { subset: true });
+  }
 
-    // ── BODY ──────────────────────────────────────────────────────
-    // "This is to certify that"
-    doc
-      .fontSize(14)
-      .fillColor('#8A9BB8')
-      .font('Helvetica')
-      .text('This is to certify that', 0, 200, { align: 'center' });
+  if (configuredTeamFontPath && fs.existsSync(configuredTeamFontPath)) {
+    const teamFontBytes = fs.readFileSync(configuredTeamFontPath);
+    teamFont = await pdfDoc.embedFont(teamFontBytes, { subset: true });
+  } else {
+    teamFont = nameFont;
+  }
 
-    // Recipient Name
-    doc
-      .fontSize(38)
-      .fillColor('#F5D78E')
-      .font('Helvetica-Bold')
-      .text(name, 0, 224, { align: 'center' });
+  // Draw participant name (centered, larger)
+  const nameSize = fitTextSize(nameText, nameFont, nameCfg.preferredSize, nameCfg.minSize, nameCfg.maxWidth);
+  const nameWidth = nameFont.widthOfTextAtSize(nameText, nameSize);
 
-    // Underline for name
-    const nameWidth = doc.widthOfString(name, { fontSize: 38 });
-    const nameX = (W - Math.min(nameWidth, 500)) / 2;
-    doc
-      .moveTo(nameX, 270)
-      .lineTo(W - nameX, 270)
-      .lineWidth(0.8)
-      .stroke('#C9A84C');
-
-    // Body text line 1
-    doc
-      .fontSize(14)
-      .fillColor('#B0BFCF')
-      .font('Helvetica')
-      .text(
-        `has successfully ${role === 'Finalist' ? 'reached the Finals at' : 'participated in'}`,
-        0,
-        285,
-        { align: 'center' }
-      );
-
-    // Event name highlight
-    doc
-      .fontSize(22)
-      .fillColor('#FFFFFF')
-      .font('Helvetica-Bold')
-      .text(EVENT_NAME, 0, 308, { align: 'center' });
-
-    // Team info
-    doc
-      .fontSize(13)
-      .fillColor('#8A9BB8')
-      .font('Helvetica')
-      .text(`representing team  `, 0, 348, { align: 'center', continued: false });
-
-    // Team name inline highlight
-    const teamLabelWidth = doc.widthOfString('representing team  ', { fontSize: 13 });
-    const teamNameWidth = doc.widthOfString(team_name, { fontSize: 13, font: 'Helvetica-Bold' });
-    const teamLineTotal = teamLabelWidth + teamNameWidth + doc.widthOfString('  as  ') + doc.widthOfString(role);
-    const teamStartX = (W - teamLineTotal) / 2;
-
-    doc.fontSize(13).fillColor('#8A9BB8').font('Helvetica').text('representing team ', teamStartX, 348);
-    doc
-      .fontSize(13)
-      .fillColor('#F5D78E')
-      .font('Helvetica-Bold')
-      .text(team_name, teamStartX + doc.widthOfString('representing team '), 348, { continued: false });
-
-    // Role badge
-    const badgeLabel = `Role: ${role}`;
-    const badgeW = doc.widthOfString(badgeLabel, { fontSize: 12 }) + 24;
-    const badgeX = (W - badgeW) / 2;
-    const badgeY = 375;
-
-    // Draw badge background
-    doc.roundedRect(badgeX, badgeY, badgeW, 24, 4).fill(role === 'Finalist' ? '#7B3F00' : '#0D2B4E');
-    doc
-      .fontSize(12)
-      .fillColor(role === 'Finalist' ? '#F5D78E' : '#7EC8E3')
-      .font('Helvetica-Bold')
-      .text(badgeLabel, badgeX + 12, badgeY + 6);
-
-    // ── FOOTER ────────────────────────────────────────────────────
-    // Two signature lines
-    const sigY = 455;
-    const sig1X = 180;
-    const sig2X = W - 280;
-
-    // Sig line 1
-    doc.moveTo(sig1X, sigY).lineTo(sig1X + 160, sigY).lineWidth(0.8).stroke('#C9A84C');
-    doc
-      .fontSize(10)
-      .fillColor('#8A9BB8')
-      .font('Helvetica')
-      .text('Event Director', sig1X, sigY + 6, { width: 160, align: 'center' });
-
-    // Sig line 2
-    doc.moveTo(sig2X, sigY).lineTo(sig2X + 160, sigY).lineWidth(0.8).stroke('#C9A84C');
-    doc
-      .fontSize(10)
-      .fillColor('#8A9BB8')
-      .font('Helvetica')
-      .text('Lead Organizer', sig2X, sigY + 6, { width: 160, align: 'center' });
-
-    // Bottom tagline
-    doc
-      .fontSize(10)
-      .fillColor('#3A4A6B')
-      .font('Helvetica')
-      .text('DropOutHacks — Building the Future, One Hack at a Time', 0, H - 50, {
-        align: 'center',
-      });
-
-    doc.end();
-
-    stream.on('finish', () => resolve(filePath));
-    stream.on('error', reject);
+  page.drawText(nameText, {
+    x: (pageWidth - nameWidth) / 2,
+    y: nameCfg.y,
+    size: nameSize,
+    font: nameFont,
+    color: rgb(nameCfg.color[0], nameCfg.color[1], nameCfg.color[2]),
   });
+
+  // Draw team name in the blank after "Team" on the sentence block.
+  const teamSize = fitTextSize(
+    teamText,
+    teamFont,
+    teamCfg.preferredSize,
+    teamCfg.minSize,
+    teamCfg.maxWidth
+  );
+  let finalTeamSize = teamSize;
+  let teamWidth = teamFont.widthOfTextAtSize(teamText, finalTeamSize);
+  const teamCenterX = typeof teamCfg.centerX === 'number' ? teamCfg.centerX : pageWidth / 2;
+  let teamX = teamCenterX - (teamWidth / 2);
+  let teamY = teamCfg.y;
+  const teamPlacement = teamCfg.placement || 'withTeamInline';
+  const withPhrase = typeof teamCfg.withPhrase === 'string' ? teamCfg.withPhrase : 'with enthusiasm.';
+  const withPhraseSize = typeof teamCfg.withPhraseSize === 'number' ? teamCfg.withPhraseSize : finalTeamSize;
+  const withPhraseCenterX = typeof teamCfg.withPhraseCenterX === 'number' ? teamCfg.withPhraseCenterX : pageWidth / 2;
+  const withPhraseWidth = teamFont.widthOfTextAtSize(withPhrase, withPhraseSize);
+  const withPhraseStartX = withPhraseCenterX - (withPhraseWidth / 2);
+  const withPhraseEndX = withPhraseStartX + withPhraseWidth;
+  const usePhraseAnchor = teamCfg.usePhraseAnchor !== false;
+  let drewTeamInline = false;
+
+  if ((teamPlacement === 'withTeamInline' || teamCfg.forceWithTeamInline === true) && teamCfg.inlineSentence) {
+    const inlineCfg = teamCfg.inlineSentence;
+    const prefix = typeof inlineCfg.prefix === 'string' ? inlineCfg.prefix : 'with ';
+    const suffix = typeof inlineCfg.suffix === 'string' ? inlineCfg.suffix : ' enthusiasm.';
+    const lineX = typeof inlineCfg.x === 'number' ? inlineCfg.x : withPhraseStartX;
+    const lineY = typeof inlineCfg.y === 'number' ? inlineCfg.y : teamCfg.y;
+    const lineWidth = typeof inlineCfg.width === 'number' ? inlineCfg.width : withPhraseWidth;
+    const lineHeight = typeof inlineCfg.height === 'number' ? inlineCfg.height : Math.max(12, finalTeamSize + 2);
+    const lineBg = Array.isArray(inlineCfg.bgColor) ? inlineCfg.bgColor : [1, 1, 1];
+    const lineTextColor = Array.isArray(inlineCfg.textColor) ? inlineCfg.textColor : [1, 1, 1];
+    const teamTextColor = Array.isArray(teamCfg.color) ? teamCfg.color : [0, 0, 0];
+    const inlinePreferred = typeof inlineCfg.preferredSize === 'number' ? inlineCfg.preferredSize : finalTeamSize;
+    const inlineMin = typeof inlineCfg.minSize === 'number' ? inlineCfg.minSize : teamCfg.minSize;
+
+    // Clear the existing static "with enthusiasm." text, then redraw with team inserted next to "with".
+    page.drawRectangle({
+      x: lineX,
+      y: lineY,
+      width: lineWidth,
+      height: lineHeight,
+      color: rgb(lineBg[0], lineBg[1], lineBg[2]),
+    });
+
+    let inlineSize = inlinePreferred;
+    let prefixWidth = teamFont.widthOfTextAtSize(prefix, inlineSize);
+    let teamInlineWidth = teamFont.widthOfTextAtSize(teamText, inlineSize);
+    let suffixWidth = teamFont.widthOfTextAtSize(suffix, inlineSize);
+    let totalInlineWidth = prefixWidth + teamInlineWidth + suffixWidth;
+
+    while (inlineSize > inlineMin && totalInlineWidth > lineWidth) {
+      inlineSize -= 1;
+      prefixWidth = teamFont.widthOfTextAtSize(prefix, inlineSize);
+      teamInlineWidth = teamFont.widthOfTextAtSize(teamText, inlineSize);
+      suffixWidth = teamFont.widthOfTextAtSize(suffix, inlineSize);
+      totalInlineWidth = prefixWidth + teamInlineWidth + suffixWidth;
+    }
+
+    let drawX = lineX + ((lineWidth - totalInlineWidth) / 2);
+    const drawY = lineY + ((lineHeight - inlineSize) / 2);
+
+    page.drawText(prefix, {
+      x: drawX,
+      y: drawY,
+      size: inlineSize,
+      font: teamFont,
+      color: rgb(lineTextColor[0], lineTextColor[1], lineTextColor[2]),
+    });
+
+    drawX += prefixWidth;
+    page.drawText(teamText, {
+      x: drawX,
+      y: drawY,
+      size: inlineSize,
+      font: teamFont,
+      color: rgb(teamTextColor[0], teamTextColor[1], teamTextColor[2]),
+    });
+
+    drawX += teamInlineWidth;
+    page.drawText(suffix, {
+      x: drawX,
+      y: drawY,
+      size: inlineSize,
+      font: teamFont,
+      color: rgb(lineTextColor[0], lineTextColor[1], lineTextColor[2]),
+    });
+
+    drewTeamInline = true;
+  }
+
+  if (teamPlacement === 'beforeWith') {
+    const gapBeforeWith = typeof teamCfg.gapBeforeWith === 'number' ? teamCfg.gapBeforeWith : 8;
+    const withBaselineY = typeof teamCfg.withBaselineY === 'number' ? teamCfg.withBaselineY : teamCfg.y;
+    const withStartX = usePhraseAnchor
+      ? withPhraseStartX
+      : (typeof teamCfg.withStartX === 'number' ? teamCfg.withStartX : teamCenterX);
+
+    if (typeof teamCfg.maxWidthBeforeWith === 'number' && teamCfg.maxWidthBeforeWith > 0 && teamWidth > teamCfg.maxWidthBeforeWith) {
+      finalTeamSize = fitTextSize(teamText, teamFont, finalTeamSize, teamCfg.minSize, teamCfg.maxWidthBeforeWith);
+      teamWidth = teamFont.widthOfTextAtSize(teamText, finalTeamSize);
+    }
+
+    teamX = withStartX - teamWidth - gapBeforeWith;
+    teamY = withBaselineY;
+    teamX = clamp(teamX, 0, Math.max(0, pageWidth - teamWidth));
+  } else if (teamPlacement === 'afterWith') {
+    const gapAfterWith = typeof teamCfg.gapAfterWith === 'number' ? teamCfg.gapAfterWith : 8;
+    const withBaselineY = typeof teamCfg.withBaselineY === 'number' ? teamCfg.withBaselineY : teamCfg.y;
+    const withEndX = usePhraseAnchor
+      ? withPhraseEndX
+      : (typeof teamCfg.withEndX === 'number' ? teamCfg.withEndX : teamCenterX);
+    const minAfterWithX = typeof teamCfg.minAfterWithX === 'number' ? teamCfg.minAfterWithX : 0;
+
+    if (typeof teamCfg.maxWidthAfterWith === 'number' && teamCfg.maxWidthAfterWith > 0 && teamWidth > teamCfg.maxWidthAfterWith) {
+      finalTeamSize = fitTextSize(teamText, teamFont, finalTeamSize, teamCfg.minSize, teamCfg.maxWidthAfterWith);
+      teamWidth = teamFont.widthOfTextAtSize(teamText, finalTeamSize);
+    }
+
+    teamX = Math.max(withEndX + gapAfterWith, minAfterWithX);
+    teamY = withBaselineY;
+    teamX = clamp(teamX, 0, Math.max(0, pageWidth - teamWidth));
+  }
+
+  if (teamPlacement === 'afterTeam' && teamCfg.eraseUnderline) {
+    page.drawRectangle({
+      x: teamCfg.eraseUnderline.x,
+      y: teamCfg.eraseUnderline.y,
+      width: teamCfg.eraseUnderline.width,
+      height: teamCfg.eraseUnderline.height,
+      color: rgb(
+        teamCfg.eraseUnderline.color[0],
+        teamCfg.eraseUnderline.color[1],
+        teamCfg.eraseUnderline.color[2]
+      ),
+    });
+
+    // Place the team label directly after "Team" (left-anchored in placeholder).
+    const inlinePaddingLeft = typeof teamCfg.inlinePaddingLeft === 'number' ? teamCfg.inlinePaddingLeft : 3;
+    const baselineOffset = typeof teamCfg.baselineOffset === 'number' ? teamCfg.baselineOffset : 1;
+    const maxInlineWidth = Math.max(0, teamCfg.eraseUnderline.width - inlinePaddingLeft - 2);
+
+    if (teamWidth > maxInlineWidth) {
+      // Keep text inside the placeholder without changing configured max width constraints.
+      finalTeamSize = fitTextSize(teamText, teamFont, finalTeamSize, teamCfg.minSize, maxInlineWidth);
+      teamWidth = teamFont.widthOfTextAtSize(teamText, finalTeamSize);
+    }
+
+    teamX = teamCfg.eraseUnderline.x + inlinePaddingLeft;
+    teamY = teamCfg.eraseUnderline.y + ((teamCfg.eraseUnderline.height - finalTeamSize) / 2) + baselineOffset;
+    teamX = clamp(teamX, 0, Math.max(0, pageWidth - teamWidth));
+  }
+
+  if (!drewTeamInline) {
+    page.drawText(teamText, {
+      x: teamX,
+      y: teamY,
+      size: finalTeamSize,
+      font: teamFont,
+      color: rgb(teamCfg.color[0], teamCfg.color[1], teamCfg.color[2]),
+    });
+  }
+
+  const pdfBytes = await pdfDoc.save();
+  return Buffer.from(pdfBytes);
 }
 
 module.exports = { generateCertificate };

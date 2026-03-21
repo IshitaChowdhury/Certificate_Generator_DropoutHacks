@@ -12,9 +12,6 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Serve generated certificates as static files
-app.use('/certificates', express.static(path.join(__dirname, 'certificates')));
-
 // Routes
 app.use('/api', certificateRoutes);
 
